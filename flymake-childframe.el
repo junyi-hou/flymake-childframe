@@ -2,7 +2,8 @@
 
 ;; Author: Junyi Hou <junyi.yi.hou@gmail.com>
 ;; Maintainer: Junyi Hou <junyi.yi.hou@gmail.com>
-;; Package-requires: ((emacs "26"))
+;; Version: 0.1.0
+;; Package-requires: ((flymake "1.3.7"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -34,7 +35,7 @@
 ;; customization
 ;; =============
 
-(defcustom flymake-childframe-delay 1
+(defcustom flymake-childframe-delay 1.5
   "Number of seconds before the childframe pops up."
   :group 'flymake-childframe
   :type 'integer)
@@ -45,9 +46,9 @@
   :type 'integer)
 
 (defcustom flymake-childframe-prefix
-  '((note . "?")
-    (warning . "!")
-    (error . "!!"))
+  '((note . "i")
+    (warning . "?")
+    (error . "!"))
   "Prefix to different messages types."
   :type '(alist :key-type symbol :value-type string)
   :group 'flymake-childframe)
@@ -75,12 +76,7 @@
   :group 'flymake-childframe)
 
 (defcustom flymake-childframe-show-conditions
-  `(
-    ,(lambda () (null (evil-insert-state-p)))
-    ,(lambda ()
-       (or (< (point) (car flymake-childframe--error-visual-line))
-           (> (point) (cdr flymake-childframe--error-visual-line))))
-    )
+  `(,(lambda () (null (evil-insert-state-p))))
   "Conditions under which `flymake-childframe' should pop error message.
 Each element should be a function that takes no argument and return a boolean value."
   :type '(repeat function)
@@ -96,15 +92,9 @@ Each element should be a function that takes no argument and return a boolean va
 (defvar flymake-childframe--frame nil
   "Frame to display linter information.")
 
-(defvar-local flymake-childframe--last-cursor-pos 0
+(defvar-local flymake-childframe--error-pos 0
   "The cursor position at which the error(s) are shown.
 `flymake-childframe' will hide the childframe if `point' is different than this.")
-
-(defvar-local flymake-childframe--error-visual-line '(0 . 0)
-  "The beginning and end of the visual line for the last displayed error(s).")
-
-(defvar-local flymake-childframe--error-pos 0
-  "The beginning and end of the visual line for the last displayed error(s).")
 
 (defconst flymake-childframe--init-parameters
   '((left . -1)
@@ -116,7 +106,7 @@ Each element should be a function that takes no argument and return a boolean va
     (no-focus-on-map . t)
     (min-width . 0)
     (min-height . 0)
-    (internal-border-width . 1)
+    (child-frame-border-width . 1)
     (vertical-scroll-bars . nil)
     (horizontal-scroll-bars . nil)
     (left-fringe . 0)
@@ -162,9 +152,6 @@ Each element should be a function that takes no argument and return a boolean va
   (unless (eq (point) flymake-childframe--error-pos)
     (make-frame-invisible flymake-childframe--frame)
 
-    ;; reset `flymake-childframe--error-visual-line'
-    (setq flymake-childframe--error-visual-line '(0 . 0))
-
     ;; remove hook
     (dolist (hook flymake-childframe-hide-childframe-hooks)
       (remove-hook hook #'flymake-childframe-hide))))
@@ -175,53 +162,51 @@ Each element should be a function that takes no argument and return a boolean va
 
 (defun flymake-childframe--show ()
   "Show error information at point."
-  (let* ((error-list (flymake-childframe--get-error)))
+  (let* ((error-list (flymake-childframe--get-error))
+				 (main-frame (selected-frame)))
     (when (and error-list
                (run-hook-with-args-until-failure 'flymake-childframe-show-conditions))
-      (let ((frame-para `(,@flymake-childframe--init-parameters
-                          (parent-frame . ,(selected-frame)))))
-
+      
         ;; First update buffer information
-        (with-current-buffer (get-buffer-create flymake-childframe--buffer)
-          (unless (eq major-mode 'flymake-childframe-buffer-mode)
-            (flymake-childframe-buffer-mode))
-          (erase-buffer)
-          (insert (flymake-childframe--format-info error-list))
-          (setq-local cursor-type nil)
-          (setq-local cursor-in-non-selected-windows nil)
-          (setq-local mode-line-format nil)
-          (setq-local header-line-format nil))
+      (with-current-buffer (get-buffer-create flymake-childframe--buffer)
+        (unless (eq major-mode 'flymake-childframe-buffer-mode)
+          (flymake-childframe-buffer-mode))
+        (erase-buffer)
+        (insert (flymake-childframe--format-info error-list))
+        (setq-local cursor-type nil)
+        (setq-local cursor-in-non-selected-windows nil)
+        (setq-local mode-line-format nil)
+        (setq-local header-line-format nil))
 
-        ;; Then create frame if needed
-        (unless (and flymake-childframe--frame (frame-live-p flymake-childframe--frame))
-          (setq flymake-childframe--frame (make-frame frame-para)))
+      ;; Then create frame if needed
+      (unless (and flymake-childframe--frame (frame-live-p flymake-childframe--frame))
+        (setq flymake-childframe--frame (make-frame flymake-childframe--init-parameters))
+				(set-face-background 'child-frame-border (face-foreground 'default) flymake-childframe--frame))
 
-        (with-selected-frame flymake-childframe--frame
-          (delete-other-windows)
-          (switch-to-buffer flymake-childframe--buffer))
+      (with-selected-frame flymake-childframe--frame
+        (delete-other-windows)
+        (switch-to-buffer flymake-childframe--buffer))
 
-        ;; move frame to desirable position
-        (apply 'set-frame-size
-               `(,flymake-childframe--frame ,@(flymake-childframe--set-frame-size)))
-        (apply 'set-frame-position
-               `(,flymake-childframe--frame ,@(flymake-chlidframe--set-frame-position)))
-        (set-face-background 'internal-border "gray80" flymake-childframe--frame)
+      ;; move frame to desirable position
+      (apply 'set-frame-size
+             `(,flymake-childframe--frame ,@(flymake-childframe--set-frame-size)))
+      (apply 'set-frame-position
+             `(,flymake-childframe--frame ,@(flymake-chlidframe--set-frame-position)))
+			(set-frame-parameter flymake-childframe--frame 'parent-frame main-frame)
+      
 
-        (redirect-frame-focus flymake-childframe--frame
-                              (frame-parent flymake-childframe--frame))
+      (redirect-frame-focus flymake-childframe--frame
+                            (frame-parent flymake-childframe--frame))
 
-        ;; update position info
-        (setq-local flymake-childframe--error-pos (point))
-        (setq-local flymake-childframe--error-visual-line
-                    `(,(save-excursion (beginning-of-visual-line) (point)) .
-                      ,(save-excursion (end-of-visual-line) (point))))
+      ;; update position info
+      (setq-local flymake-childframe--error-pos (point))
 
-        ;; setup remove hook
-        (dolist (hook flymake-childframe-hide-childframe-hooks)
-          (add-hook hook #'flymake-childframe-hide))
+      ;; setup remove hook
+      (dolist (hook flymake-childframe-hide-childframe-hooks)
+        (add-hook hook #'flymake-childframe-hide))
 
-        ;; finally show frame
-        (make-frame-visible flymake-childframe--frame)))))
+      ;; finally show frame
+      (make-frame-visible flymake-childframe--frame))))
 
 (define-derived-mode flymake-childframe-buffer-mode fundamental-mode "flymake-childframe"
   "Major mode to display the `flymake-childframe' buffer.")
@@ -247,15 +232,26 @@ Each element should be a function that takes no argument and return a boolean va
       `(,(1+ width) ,height))))
 
 (defun flymake-chlidframe--set-frame-position ()
-  "Return the pixel position of `point', adjusted if the size of `flymake-childframe--frame' exceeds the boundary of the current frame."
-  (let* ((x (car (window-absolute-pixel-position)))
-         (y (+ (cdr (window-absolute-pixel-position))
-               (default-line-height)))
-         (off-set (- (+ x (frame-pixel-width flymake-childframe--frame))
-                     (nth 2 (frame-edges)))))
-    (if (> off-set 0)
-        `(,(- x off-set) ,y)
-      `(,x ,y))))
+	(pcase-let* ((`(,win-left ,win-top ,win-right ,win-bottom) (window-inside-pixel-edges))
+               (`(,cursor-x . ,cursor-y) (posn-x-y (posn-at-point)))
+               (parent-frame (frame-parent flymake-childframe--frame))
+               (char-width (frame-char-width parent-frame))
+               (char-height (frame-char-height parent-frame))
+               (cursor-left (+ win-left cursor-x))
+               (cursor-top (+ win-top cursor-y))
+               (cursor-right (+ cursor-left char-width))
+               (cursor-bottom (+ cursor-top char-height))
+
+               (frame-width (frame-pixel-width flymake-childframe--frame))
+               (frame-height (frame-pixel-height flymake-childframe--frame))
+
+               (fits-right (<= (+ cursor-right frame-width) win-right))
+               (fits-bottom (<= (+ cursor-bottom frame-height) win-bottom)))
+
+    (cond ((and fits-right fits-bottom) (list cursor-right cursor-bottom))
+          ((and fits-right (not fits-bottom)) (list cursor-right (- cursor-top frame-height)))
+          ((and fits-bottom (not fits-right)) (list (- cursor-left frame-width) cursor-bottom))
+          (t (list (- cursor-left frame-width) (- cursor-top frame-height))))))
 
 ;; ==============================
 ;; get information from `flymake'
@@ -265,9 +261,7 @@ Each element should be a function that takes no argument and return a boolean va
   "Get `flymake--diag' between BEG and END, if they are not provided, use `line-beginning-position' and `line-end-position'.  Return a list of errors found between BEG and END."
   (let* ((beg (or beg (save-excursion (beginning-of-visual-line) (point))))
          (end (or end (save-excursion (end-of-visual-line) (point))))
-         (error-list (flymake--overlays
-                      :beg beg
-                      :end end)))
+         (error-list (flymake-diagnostics beg end)))
     error-list))
 
 (defun flymake-childframe--get-message-type (type property)
@@ -286,16 +280,13 @@ Each element should be a function that takes no argument and return a boolean va
          (text (flymake-diagnostic-text err))
          (prefix (flymake-childframe--get-message-type type 'prefix))
          (face (flymake-childframe--get-message-type type 'face)))
-    (propertize (format "%s %s" prefix text) 'face face)))
+    (concat (propertize (format "[%s]" prefix) 'face face) " " text)))
 
 (defun flymake-childframe--format-info (error-list)
   "Format the information from ERROR-LIST."
-  (let* ((err (overlay-get (car error-list) 'flymake-diagnostic))
-         (error-list (cdr error-list))
-         (out (flymake-childframe--format-one err)))
-    (if error-list
-        (concat out "\n" (flymake-childframe--format-info error-list))
-      out)))
+  (thread-last error-list
+							 (mapcar #'flymake-childframe--format-one)
+							 (cl-reduce (lambda (a b) (format "%s\n%s" a b)))))
 
 (provide 'flymake-childframe)
 ;;; flymake-childframe.el ends here

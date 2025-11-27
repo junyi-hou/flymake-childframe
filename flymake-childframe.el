@@ -38,7 +38,7 @@
 (defcustom flymake-childframe-delay 1.5
   "Number of seconds before the childframe pops up."
   :group 'flymake-childframe
-  :type 'integer)
+  :type 'number)
 
 (defcustom flymake-childframe-timeout nil
   "Number of seconds to close the childframe."
@@ -96,6 +96,9 @@ Each element should be a function that takes no argument and return a boolean va
   "The cursor position at which the error(s) are shown.
 `flymake-childframe' will hide the childframe if `point' is different than this.")
 
+(defvar flymake-childframe--timer nil
+  "Timer object for the scheduled childframe show (from `run-at-time').")
+
 (defconst flymake-childframe--init-parameters
   '((left . -1)
     (top . -1)
@@ -139,17 +142,37 @@ Each element should be a function that takes no argument and return a boolean va
   :group flymake-childframe
   (if flymake-childframe-mode
       (add-hook 'post-command-hook #'flymake-childframe-show nil 'local)
-    (remove-hook 'post-command-hook #'flymake-childframe-show 'local)))
+    (remove-hook 'post-command-hook #'flymake-childframe-show 'local)
+    ;; Cancel any pending timer when disabling the mode
+    (when (timerp flymake-childframe--timer)
+      (cancel-timer flymake-childframe--timer)
+      (setq flymake-childframe--timer nil))))
 
 (defun flymake-childframe-show ()
   "Show error information delaying for `flymake-childframe-delay' second."
-  (run-at-time flymake-childframe-delay nil
-               #'flymake-childframe--show))
+  ;; Cancel previously scheduled timer (if any) to avoid multiple pending timers.
+  (when (timerp flymake-childframe--timer)
+    (cancel-timer flymake-childframe--timer)
+    (setq flymake-childframe--timer nil))
+  (let ((pos (point)))
+    (setq flymake-childframe--timer
+          (run-at-time flymake-childframe-delay nil
+                       (lambda ()
+                         ;; clear the timer var as it's firing now
+                         (setq flymake-childframe--timer nil)
+                         ;; Only show if point hasn't moved since the timer was scheduled.
+                         (when (eq pos (point))
+                           (flymake-childframe--show)))))))
 
 (defun flymake-childframe-hide ()
   "Hide error information.  Only need to run once.  Once run, remove itself from the hooks."
   ;; if move cursor, hide childframe
   (unless (eq (point) flymake-childframe--error-pos)
+    ;; cancel any pending show timer
+    (when (timerp flymake-childframe--timer)
+      (cancel-timer flymake-childframe--timer)
+      (setq flymake-childframe--timer nil))
+
     (make-frame-invisible flymake-childframe--frame)
 
     ;; remove hook
@@ -162,12 +185,16 @@ Each element should be a function that takes no argument and return a boolean va
 
 (defun flymake-childframe--show ()
   "Show error information at point."
+  ;; ensure any timer state is cleared (we may be invoked directly or from timer)
+  (when (timerp flymake-childframe--timer)
+    (cancel-timer flymake-childframe--timer)
+    (setq flymake-childframe--timer nil))
   (let* ((error-list (flymake-childframe--get-error))
-				 (main-frame (selected-frame)))
+         (main-frame (selected-frame)))
     (when (and error-list
                (run-hook-with-args-until-failure 'flymake-childframe-show-conditions))
-      
-        ;; First update buffer information
+
+      ;; First update buffer information
       (with-current-buffer (get-buffer-create flymake-childframe--buffer)
         (unless (eq major-mode 'flymake-childframe-buffer-mode)
           (flymake-childframe-buffer-mode))
@@ -181,7 +208,7 @@ Each element should be a function that takes no argument and return a boolean va
       ;; Then create frame if needed
       (unless (and flymake-childframe--frame (frame-live-p flymake-childframe--frame))
         (setq flymake-childframe--frame (make-frame flymake-childframe--init-parameters))
-				(set-face-background 'child-frame-border (face-foreground 'default) flymake-childframe--frame))
+        (set-face-background 'child-frame-border (face-foreground 'default) flymake-childframe--frame))
 
       (with-selected-frame flymake-childframe--frame
         (delete-other-windows)
@@ -192,8 +219,7 @@ Each element should be a function that takes no argument and return a boolean va
              `(,flymake-childframe--frame ,@(flymake-childframe--set-frame-size)))
       (apply 'set-frame-position
              `(,flymake-childframe--frame ,@(flymake-chlidframe--set-frame-position)))
-			(set-frame-parameter flymake-childframe--frame 'parent-frame main-frame)
-      
+      (set-frame-parameter flymake-childframe--frame 'parent-frame main-frame)
 
       (redirect-frame-focus flymake-childframe--frame
                             (frame-parent flymake-childframe--frame))
@@ -232,7 +258,7 @@ Each element should be a function that takes no argument and return a boolean va
       `(,(1+ width) ,height))))
 
 (defun flymake-chlidframe--set-frame-position ()
-	(pcase-let* ((`(,win-left ,win-top ,win-right ,win-bottom) (window-inside-pixel-edges))
+  (pcase-let* ((`(,win-left ,win-top ,win-right ,win-bottom) (window-inside-pixel-edges))
                (`(,cursor-x . ,cursor-y) (posn-x-y (posn-at-point)))
                (parent-frame (frame-parent flymake-childframe--frame))
                (char-width (frame-char-width parent-frame))
@@ -285,8 +311,8 @@ Each element should be a function that takes no argument and return a boolean va
 (defun flymake-childframe--format-info (error-list)
   "Format the information from ERROR-LIST."
   (thread-last error-list
-							 (mapcar #'flymake-childframe--format-one)
-							 (cl-reduce (lambda (a b) (format "%s\n%s" a b)))))
+               (mapcar #'flymake-childframe--format-one)
+               (cl-reduce (lambda (a b) (format "%s\n%s" a b)))))
 
 (provide 'flymake-childframe)
 ;;; flymake-childframe.el ends here

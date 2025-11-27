@@ -210,9 +210,13 @@ Each element should be a function that takes no argument and return a boolean va
         (setq flymake-childframe--frame (make-frame flymake-childframe--init-parameters))
         (set-face-background 'child-frame-border (face-foreground 'default) flymake-childframe--frame))
 
-      (with-selected-frame flymake-childframe--frame
-        (delete-other-windows)
-        (switch-to-buffer flymake-childframe--buffer))
+      ;; Put the buffer into the childframe's root window without selecting that frame,
+      ;; so it doesn't steal input focus. Use frame-root-window + set-window-buffer.
+      (let ((root (frame-root-window flymake-childframe--frame)))
+        (when (window-live-p root)
+          (with-selected-window root
+            (delete-other-windows)
+            (set-window-buffer root flymake-childframe--buffer))))
 
       ;; move frame to desirable position
       (apply 'set-frame-size
@@ -231,8 +235,11 @@ Each element should be a function that takes no argument and return a boolean va
       (dolist (hook flymake-childframe-hide-childframe-hooks)
         (add-hook hook #'flymake-childframe-hide))
 
-      ;; finally show frame
-      (make-frame-visible flymake-childframe--frame))))
+      ;; finally show frame, but restore focus to the main frame so the childframe
+      ;; won't gain input focus.
+      (make-frame-visible flymake-childframe--frame)
+      (when (frame-live-p main-frame)
+        (select-frame-set-input-focus main-frame)))))
 
 (define-derived-mode flymake-childframe-buffer-mode fundamental-mode "flymake-childframe"
   "Major mode to display the `flymake-childframe' buffer.")

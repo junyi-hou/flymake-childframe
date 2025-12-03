@@ -46,9 +46,9 @@
   :type 'integer)
 
 (defcustom flymake-childframe-prefix
-  '((note . "i")
-    (warning . "?")
-    (error . "!"))
+  '((note . "[i]")
+    (warning . "[?]")
+    (error . "[!]"))
   "Prefix to different messages types."
   :type '(alist :key-type symbol :value-type string)
   :group 'flymake-childframe)
@@ -313,7 +313,7 @@ Each element should be a function that takes no argument and return a boolean va
          (text (flymake-diagnostic-text err))
          (prefix (flymake-childframe--get-message-type type 'prefix))
          (face (flymake-childframe--get-message-type type 'face)))
-    (concat (propertize (format "[%s]" prefix) 'face face) " " text)))
+    (concat (propertize (format "%s" prefix) 'face face) " " text)))
 
 (defun flymake-childframe--format-info (error-list)
   "Format the information from ERROR-LIST."

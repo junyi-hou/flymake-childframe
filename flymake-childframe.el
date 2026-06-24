@@ -2,8 +2,8 @@
 
 ;; Author: Junyi Hou <junyi.yi.hou@gmail.com>
 ;; Maintainer: Junyi Hou <junyi.yi.hou@gmail.com>
-;; Version: 0.1.0
-;; Package-requires: ((flymake "1.3.7"))
+;; Version: 0.2.0
+;; Package-requires: ((emacs "31") (flymake "1.3.7"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -25,6 +25,8 @@
 ;;; Code:
 
 (require 'flymake)
+(require 'cl-lib)
+(require 'seq)
 
 (defgroup flymake-childframe nil
   "Group for customize flymake childframe."
@@ -76,7 +78,10 @@
   :group 'flymake-childframe)
 
 (defcustom flymake-childframe-show-conditions
-  `(,(lambda () (null (evil-insert-state-p))))
+  `(,(lambda ()
+       (let ((fn (and (fboundp 'evil-insert-state-p)
+                      (symbol-function 'evil-insert-state-p))))
+         (or (not fn) (not (funcall fn))))))
   "Conditions under which `flymake-childframe' should pop error message.
 Each element should be a function that takes no argument and return a boolean value."
   :type '(repeat function)
@@ -99,16 +104,14 @@ Each element should be a function that takes no argument and return a boolean va
 (defvar flymake-childframe--timer nil
   "Timer object for the scheduled childframe show (from `run-at-time').")
 
-(defconst flymake-childframe--init-parameters
-  '((left . -1)
-    (top . -1)
-    (width  . 0)
-    (height  . 0)
-
-    (no-accept-focus . t)
+(defvar flymake-childframe--frame-parameters
+  '((no-accept-focus . t)
     (no-focus-on-map . t)
-    (min-width . 0)
-    (min-height . 0)
+    (min-width . t)
+    (min-height . t)
+    (border-width . 0)
+    (outer-border-width . 0)
+    (internal-border-width . 1)
     (child-frame-border-width . 1)
     (vertical-scroll-bars . nil)
     (horizontal-scroll-bars . nil)
@@ -116,20 +119,52 @@ Each element should be a function that takes no argument and return a boolean va
     (right-fringe . 0)
     (menu-bar-lines . 0)
     (tool-bar-lines . 0)
+    (tab-bar-lines . 0)
+    (tab-bar-lines-keep-state . t)
     (line-spacing . 0)
     (unsplittable . t)
     (undecorated . t)
-    (visibility . nil)
+    (fullscreen . nil)
     (mouse-wheel-frame . nil)
     (no-other-frame . t)
     (cursor-type . nil)
     (inhibit-double-buffering . t)
     (drag-internal-border . t)
     (no-special-glyphs . t)
-    (desktop-dont-save . t)
-    (skip-taskbar . t)
-    (minibuffer . nil))
+    (desktop-dont-save . t))
   "The initial frame parameters for `flymake-childframe--frame'.")
+
+(defvar flymake-childframe--buffer-parameters
+  '((mode-line-format . nil)
+    (header-line-format . nil)
+    (tab-line-format . nil)
+    (tab-bar-format . nil)
+    (frame-title-format . "")
+    (truncate-lines . t)
+    (cursor-in-non-selected-windows . nil)
+    (cursor-type . nil)
+    (show-trailing-whitespace . nil)
+    (display-line-numbers . nil)
+    (left-fringe-width . 0)
+    (right-fringe-width . 0)
+    (left-margin-width . 0)
+    (right-margin-width . 0)
+    (fringes-outside-margins . 0)
+    (fringe-indicator-alist (continuation) (truncation))
+    (indicate-empty-lines . nil)
+    (indicate-buffer-boundaries . nil))
+  "Default child frame buffer parameters.")
+
+(defvar flymake-childframe--gtk-resize-child-frames
+  (let ((case-fold-search t))
+    (and (string-match-p "gtk3" system-configuration-features)
+         (string-match-p "gnome\\|cinnamon"
+                         (or (getenv "XDG_CURRENT_DESKTOP")
+                             (getenv "DESKTOP_SESSION") ""))
+         'resize-mode)))
+
+(defvar x-gtk-resize-child-frames)
+(defvar x-fast-protocol-requests)
 
 ;; ==========
 ;; minor mode
@@ -146,7 +181,8 @@ Each element should be a function that takes no argument and return a boolean va
     ;; Cancel any pending timer when disabling the mode
     (when (timerp flymake-childframe--timer)
       (cancel-timer flymake-childframe--timer)
-      (setq flymake-childframe--timer nil))))
+      (setq flymake-childframe--timer nil))
+    (flymake-childframe-hide t)))
 
 (defun flymake-childframe-show ()
   "Show error information delaying for `flymake-childframe-delay' second."
@@ -164,20 +200,20 @@ Each element should be a function that takes no argument and return a boolean va
                          (when (eq pos (point))
                            (flymake-childframe--show)))))))
 
-(defun flymake-childframe-hide ()
+(defun flymake-childframe-hide (&optional force)
   "Hide error information.  Only need to run once.  Once run, remove itself from the hooks."
   ;; if move cursor, hide childframe
-  (unless (eq (point) flymake-childframe--error-pos)
+  (when (or force (not (eq (point) flymake-childframe--error-pos)))
     ;; cancel any pending show timer
     (when (timerp flymake-childframe--timer)
       (cancel-timer flymake-childframe--timer)
       (setq flymake-childframe--timer nil))
 
-    (make-frame-invisible flymake-childframe--frame)
+    (flymake-childframe--hide-frame flymake-childframe--frame)
 
     ;; remove hook
     (dolist (hook flymake-childframe-hide-childframe-hooks)
-      (remove-hook hook #'flymake-childframe-hide))))
+      (remove-hook hook #'flymake-childframe-hide 'local))))
 
 ;; =================
 ;; display mechanism
@@ -194,66 +230,47 @@ Each element should be a function that takes no argument and return a boolean va
     (when (and error-list
                (run-hook-with-args-until-failure 'flymake-childframe-show-conditions))
 
-      ;; First update buffer information
-      (with-current-buffer (get-buffer-create flymake-childframe--buffer)
-        (unless (eq major-mode 'flymake-childframe-buffer-mode)
-          (flymake-childframe-buffer-mode))
+      (with-current-buffer (flymake-childframe--make-buffer)
         (erase-buffer)
         (insert (flymake-childframe--format-info error-list))
-        (setq-local cursor-type nil)
-        (setq-local cursor-in-non-selected-windows nil)
-        (setq-local mode-line-format nil)
-        (setq-local header-line-format nil))
-
-      ;; Then create frame if needed
-      (unless (and flymake-childframe--frame (frame-live-p flymake-childframe--frame))
-        (setq flymake-childframe--frame (make-frame flymake-childframe--init-parameters))
-        (set-face-background 'child-frame-border (face-foreground 'default) flymake-childframe--frame))
-
-      ;; Put the buffer into the childframe's root window without selecting that frame,
-      ;; so it doesn't steal input focus. Use frame-root-window + set-window-buffer.
-      (let ((root (frame-root-window flymake-childframe--frame)))
-        (when (window-live-p root)
-          (with-selected-window root
-            (delete-other-windows)
-            (set-window-buffer root flymake-childframe--buffer))))
-
-      ;; move frame to desirable position
-      (apply 'set-frame-size
-             `(,flymake-childframe--frame ,@(flymake-childframe--set-frame-size)))
-      (apply 'set-frame-position
-             `(,flymake-childframe--frame ,@(flymake-chlidframe--set-frame-position)))
-      (set-frame-parameter flymake-childframe--frame 'parent-frame main-frame)
-
-      (redirect-frame-focus flymake-childframe--frame
-                            (frame-parent flymake-childframe--frame))
+        (pcase-let* ((`(,width . ,height) (flymake-childframe--frame-size))
+                     (`(,x . ,y) (flymake-childframe--frame-position width height)))
+          (setq flymake-childframe--frame
+                (flymake-childframe--make-frame
+                 flymake-childframe--frame main-frame x y width height))))
 
       ;; update position info
       (setq-local flymake-childframe--error-pos (point))
 
       ;; setup remove hook
       (dolist (hook flymake-childframe-hide-childframe-hooks)
-        (add-hook hook #'flymake-childframe-hide))
+        (add-hook hook #'flymake-childframe-hide nil 'local))
 
-      ;; finally show frame, but restore focus to the main frame so the childframe
-      ;; won't gain input focus.
-      (make-frame-visible flymake-childframe--frame)
-      (when (frame-live-p main-frame)
-        (select-frame-set-input-focus main-frame)))))
+      (make-frame-visible flymake-childframe--frame))))
 
 (define-derived-mode flymake-childframe-buffer-mode fundamental-mode "flymake-childframe"
   "Major mode to display the `flymake-childframe' buffer.")
 
-(defun flymake-childframe--set-frame-size ()
-  "Set `flymake-chldframe--frame' size based on `flymake-childframe--buffer'."
-  (let ((max-width (/ (frame-width (frame-parent flymake-childframe--frame)) 2))
-        (height 0)
-        (width 0))
+(defun flymake-childframe--make-buffer ()
+  "Create and initialize the child frame buffer."
+  (let ((buffer (get-buffer-create flymake-childframe--buffer)))
+    (with-current-buffer buffer
+      (unless (eq major-mode 'flymake-childframe-buffer-mode)
+        (flymake-childframe-buffer-mode))
+      (dolist (var flymake-childframe--buffer-parameters)
+        (set (make-local-variable (car var)) (cdr var)))
+      buffer)))
 
+(defun flymake-childframe--frame-size ()
+  "Return popup size in pixels based on `flymake-childframe--buffer'."
+  (let ((max-width (/ (frame-width (window-frame)) 2))
+        (height 0)
+        (width 0)
+        (char-width (frame-char-width (window-frame)))
+        (char-height (frame-char-height (window-frame))))
     (with-current-buffer flymake-childframe--buffer
       (dolist (error-msg (split-string (buffer-string) "\n"))
         (let ((current-width (length error-msg)))
-
           ;; if the current message is too long
           (when (> current-width max-width)
             (setq current-width max-width
@@ -262,12 +279,14 @@ Each element should be a function that takes no argument and return a boolean va
           ;; update width and height
           (setq width (max current-width width)
                 height (1+ height))))
-      `(,(1+ width) ,height))))
+      (cons (* (max 1 (1+ width)) char-width)
+            (* (max 1 height) char-height)))))
 
-(defun flymake-chlidframe--set-frame-position ()
+(defun flymake-childframe--frame-position (frame-width frame-height)
+  "Return popup position for FRAME-WIDTH and FRAME-HEIGHT."
   (pcase-let* ((`(,win-left ,win-top ,win-right ,win-bottom) (window-inside-pixel-edges))
                (`(,cursor-x . ,cursor-y) (posn-x-y (posn-at-point)))
-               (parent-frame (frame-parent flymake-childframe--frame))
+               (parent-frame (window-frame))
                (char-width (frame-char-width parent-frame))
                (char-height (frame-char-height parent-frame))
                (cursor-left (+ win-left cursor-x))
@@ -275,16 +294,91 @@ Each element should be a function that takes no argument and return a boolean va
                (cursor-right (+ cursor-left char-width))
                (cursor-bottom (+ cursor-top char-height))
 
-               (frame-width (frame-pixel-width flymake-childframe--frame))
-               (frame-height (frame-pixel-height flymake-childframe--frame))
-
                (fits-right (<= (+ cursor-right frame-width) win-right))
                (fits-bottom (<= (+ cursor-bottom frame-height) win-bottom)))
 
-    (cond ((and fits-right fits-bottom) (list cursor-right cursor-bottom))
-          ((and fits-right (not fits-bottom)) (list cursor-right (- cursor-top frame-height)))
-          ((and fits-bottom (not fits-right)) (list (- cursor-left frame-width) cursor-bottom))
-          (t (list (- cursor-left frame-width) (- cursor-top frame-height))))))
+    (cond ((and fits-right fits-bottom) (cons cursor-right cursor-bottom))
+          ((and fits-right (not fits-bottom)) (cons cursor-right (- cursor-top frame-height)))
+          ((and fits-bottom (not fits-right)) (cons (- cursor-left frame-width) cursor-bottom))
+          (t (cons (- cursor-left frame-width) (- cursor-top frame-height))))))
+
+(defun flymake-childframe--make-frame (frame parent x y width height)
+  "Show current buffer in child FRAME at X/Y with WIDTH/HEIGHT pixels."
+  (when-let* (((frame-live-p frame))
+              (timer (frame-parameter frame 'flymake-childframe--hide-timer)))
+    (cancel-timer timer)
+    (set-frame-parameter frame 'flymake-childframe--hide-timer nil))
+  (let* ((window-min-height 1)
+         (window-min-width 1)
+         (inhibit-redisplay t)
+         (x-fast-protocol-requests t)
+         (x-gtk-resize-child-frames flymake-childframe--gtk-resize-child-frames)
+         (before-make-frame-hook)
+         (after-make-frame-functions)
+         (graphic (display-graphic-p parent))
+         (params `((background-color . ,(face-background 'default nil 'default))
+                   (font . ,(frame-parameter parent 'font))
+                   (right-fringe . ,right-fringe-width)
+                   (left-fringe . ,left-fringe-width)
+                   ,@flymake-childframe--frame-parameters)))
+    (unless (and (frame-live-p frame)
+                 (eq (frame-parent frame) parent)
+                 (eq graphic (display-graphic-p frame))
+                 (window-live-p (frame-root-window frame)))
+      (when frame (delete-frame frame))
+      (setq frame (make-frame
+                   `((name . ,(if graphic "FlymakeChildframeGUI" "FlymakeChildframeTTY"))
+                     (parent-frame . ,parent)
+                     (minibuffer . ,(minibuffer-window parent))
+                     (width . 0)
+                     (height . 0)
+                     (visibility . nil)
+                     ,@params))))
+    (let ((new (face-foreground 'default nil 'default)))
+      (unless (equal (face-attribute 'internal-border :background frame 'default) new)
+        (set-face-background 'internal-border new frame))
+      (unless (equal (face-attribute 'child-frame-border :background frame 'default) new)
+        (set-face-background 'child-frame-border new frame)))
+    (let* ((win (frame-root-window frame))
+           (is (frame-parameters frame))
+           (diff (cl-loop for p in params for (k . v) = p
+                          unless (equal (alist-get k is) v) collect p)))
+      (when diff (modify-frame-parameters frame diff))
+      (when (or diff (not (eq (window-buffer win) (current-buffer))))
+        (set-window-buffer win (current-buffer)))
+      (set-window-parameter win 'no-delete-other-windows t)
+      (set-window-parameter win 'no-other-window t)
+      (set-window-dedicated-p win t))
+    (redirect-frame-focus frame parent)
+    (pcase-let ((`(,px . ,py) (frame-position frame)))
+      (cond
+       ((and (= x px) (= y py)) (set-frame-size frame width height t))
+       ((fboundp 'set-frame-size-and-position-pixelwise)
+        (set-frame-size-and-position-pixelwise frame width height x y))
+       (t (set-frame-size frame width height t)
+          (set-frame-position frame x y)))))
+  frame)
+
+(defun flymake-childframe--hide-frame-deferred (frame)
+  "Hide child FRAME and clear its buffer."
+  (when (and (frame-live-p frame) (frame-visible-p frame))
+    (set-frame-parameter frame 'flymake-childframe--hide-timer nil)
+    (make-frame-invisible frame)
+    (when-let* ((win (frame-root-window frame)))
+      (with-current-buffer (window-buffer win)
+        (with-silent-modifications
+          (delete-region (point-min) (point-max)))))))
+
+(defun flymake-childframe--hide-frame (frame)
+  "Hide child FRAME."
+  (when (and (frame-live-p frame) (frame-visible-p frame))
+    (cond
+     ((not (display-graphic-p frame))
+      (flymake-childframe--hide-frame-deferred frame))
+     ((not (frame-parameter frame 'flymake-childframe--hide-timer))
+      (set-frame-parameter
+       frame 'flymake-childframe--hide-timer
+       (run-at-time 0 nil #'flymake-childframe--hide-frame-deferred frame))))))
 
 ;; ==============================
 ;; get information from `flymake'

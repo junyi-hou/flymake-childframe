@@ -166,6 +166,7 @@ cursor and flips upward when there is no room; see also
       (cancel-timer flymake-childframe--timer)
       (setq flymake-childframe--timer nil))
     (posframe-hide flymake-childframe--buffer)
+    (remove-hook 'window-buffer-change-functions #'flymake-childframe-hide)
     (dolist (hook flymake-childframe-hide-childframe-hooks)
       (remove-hook hook #'flymake-childframe-hide 'local))))
 
@@ -190,6 +191,10 @@ cursor and flips upward when there is no room; see also
        :border-color (face-foreground 'default nil 'default)
        :lines-truncate t)
       (setq-local flymake-childframe--error-pos (point))
+      ;; `window-buffer-change-functions' is installed globally because the
+      ;; buffer-local hide hooks stay with the source buffer when we switch
+      ;; away from it, leaving the childframe stranded.
+      (add-hook 'window-buffer-change-functions #'flymake-childframe-hide)
       (dolist (hook flymake-childframe-hide-childframe-hooks)
         (add-hook hook #'flymake-childframe-hide nil 'local)))))
 
